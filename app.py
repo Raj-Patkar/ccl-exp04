@@ -1,23 +1,40 @@
 from flask import Flask, request, jsonify
 from datetime import datetime
 from collections import deque
-import random
+import pandas as pd
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.metrics.pairwise import cosine_similarity
 import os
 
 app = Flask(__name__)
 
-# Keep the last 100 processed requests in memory
+# Keep last 100 processed requests for analytics
 processed_requests = deque(maxlen=100)
+
+# Load course dataset
+courses = pd.read_csv("courses.csv", quotechar='"')
+
+# Ensure 'id' column is integer
+courses["id"] = courses["id"].astype(int)
+
+# Handle missing descriptions
+courses["description"] = courses["description"].fillna("")
+
+# Create TF-IDF matrix
+vectorizer = TfidfVectorizer(stop_words="english")
+tfidf_matrix = vectorizer.fit_transform(courses["description"])
+similarity_matrix = cosine_similarity(tfidf_matrix, tfidf_matrix)
 
 @app.route("/", methods=["GET"])
 def root():
     return jsonify({
-        "service": "E-Learning Backend API",
+        "service": "Edu Analytics ML API",
         "status": "ok",
         "endpoints": {
-            "POST /recommend": "Send { user_id, interests? } and receive recommendations",
-            "GET /analytics": "View last 100 processed requests",
-            "GET /health": "Health probe for Azure"
+            "GET /health": "Health probe for Azure",
+            "GET /courses": "List all courses",
+            "POST /recommend": "Send { user_id, course_id } and get similar courses",
+            "GET /analytics": "Last 100 processed recommendation requests"
         }
     })
 
@@ -25,35 +42,46 @@ def root():
 def health():
     return jsonify({"status": "healthy", "timestamp": datetime.utcnow().isoformat() + "Z"})
 
+@app.route("/courses", methods=["GET"])
+def list_courses():
+    return jsonify(courses[["id", "title"]].to_dict(orient="records"))
+
 @app.route("/recommend", methods=["POST"])
 def recommend():
     payload = request.get_json(silent=True) or {}
     user_id = payload.get("user_id")
-    interests = payload.get("interests", [])
+    course_id = payload.get("course_id")
 
     if not user_id:
         return jsonify({"error": "user_id is required"}), 400
+    if course_id is None:
+        return jsonify({"error": "course_id is required"}), 400
 
-    catalog = {
-        "python": ["Python Basics", "Flask for Web", "Data Analysis with Pandas"],
-        "ml": ["Intro to ML", "Supervised Learning", "Model Deployment"],
-        "cloud": ["Azure Fundamentals", "Deploying on App Service", "CI/CD Pipelines"],
-        "default": ["Critical Thinking", "Time Management", "Learning How to Learn"]
-    }
+    try:
+        course_id = int(course_id)
+    except ValueError:
+        return jsonify({"error": "course_id must be an integer"}), 400
 
-    pool = []
-    for key in interests:
-        pool.extend(catalog.get(key.lower(), []))
-    if not pool:
-        for v in catalog.values():
-            pool.extend(v)
+    if course_id not in courses["id"].values:
+        return jsonify({"error": f"Course ID {course_id} not found"}), 404
 
-    k = 3 if len(pool) >= 3 else len(pool)
-    recommendations = random.sample(pool, k=k) if pool else []
+    # Find index of the selected course
+    idx = courses[courses["id"] == course_id].index[0]
+
+    # Get similarity scores
+    sim_scores = list(enumerate(similarity_matrix[idx]))
+    sim_scores = sorted(sim_scores, key=lambda x: x[1], reverse=True)
+    sim_scores = sim_scores[1:4]  # top 3 similar courses
+
+    recommendations = [{
+        "id": int(courses.iloc[i[0]]["id"]),
+        "title": courses.iloc[i[0]]["title"],
+        "description": courses.iloc[i[0]]["description"]
+    } for i in sim_scores]
 
     result = {
         "user_id": user_id,
-        "interests": interests,
+        "course_id": course_id,
         "recommendations": recommendations,
         "processed_at": datetime.utcnow().isoformat() + "Z"
     }
@@ -65,10 +93,9 @@ def recommend():
 def analytics():
     return jsonify({"count": len(processed_requests), "items": list(processed_requests)})
 
-# Entry point for WSGI (Azure expects "application")
+# Azure WSGI entry point
 application = app
 
 if __name__ == "__main__":
-    # Use PORT from environment (important for Azure)
     port = int(os.environ.get("PORT", 8000))
     app.run(host="0.0.0.0", port=port)
