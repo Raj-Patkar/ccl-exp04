@@ -2,6 +2,7 @@ from flask import Flask, request, jsonify
 from datetime import datetime
 from collections import deque
 import random
+import os
 
 app = Flask(__name__)
 
@@ -64,5 +65,10 @@ def recommend():
 def analytics():
     return jsonify({"count": len(processed_requests), "items": list(processed_requests)})
 
+# Entry point for WSGI (Azure expects "application")
+application = app
+
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=8000)
+    # Use PORT from environment (important for Azure)
+    port = int(os.environ.get("PORT", 8000))
+    app.run(host="0.0.0.0", port=port)
